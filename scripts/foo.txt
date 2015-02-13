@@ -1,2 +1,0 @@
-This folder keeps all the derived datasets obtained from the datasets under investigation for the Methylation analysis- for
-example GSE52865 data.
