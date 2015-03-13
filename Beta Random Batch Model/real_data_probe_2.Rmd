@@ -1,0 +1,292 @@
+---
+title: "Real Data Analysis For Methylation Experiments"
+author: "Kushal Kumar Dey"
+date: "Sunday, March 08, 2015"
+output: html_document
+---
+
+In this script, we shall apply the probe level Methylation Topic Model on a real dataset. The dataset I consider in this example is the GSE52865 dataset in the GEO Omnibus, which crresponds to the paper **A DNA methylation-based definition of biologically distinct breast cancer subtypes**. In this paper, the authors have tried to address various types and sub-types of cancer through heat maps and hierarchical agglomerative clustering. We shall employ a topic modeling tpe algorithm to see how model based admixture type clustering would work under a situtation like this. We select the 2000 top CpG sites having the highest coefficient of variation (CV). 
+
+The dataset is stored in the folder *Methylation* under the home directory *kkdey* in the RCC Midway Cluster. I produce two text files, one with the beta intensity expression values across all the samples for the top varying $1000$ CG sites and the other, for the top varying $10,000$ CG sites. The files were named **betas_file_1000.txt** and **betas_file_10000_txt** and in the following R chunk I obtain the bivariate plots of First and Second PC, and also First PC and Third PC to see how the normal samples differ from tumor samples. 
+
+
+```{r,echo=TRUE,eval=TRUE}
+
+#############  Exploration of the Data for the top 10,000 CpG sites selected using highest CV   #######################################
+
+methData=read.table("D:/Matthew_Stephens_Project/Methylation/Methylation Expt 2/betas_file_10000.txt");
+betas=t(methData)
+
+###  now run the remaining part of the Methyl.estimation.R file 
+
+###  The number of clusters in the real Data -  by Principal Component Analysis
+
+###  Probably from the PC plots (PC1 vs PC2) or the Circular Projection plot, we
+
+###   can get some intuitive idea
+
+
+Princomp.analysis=prcomp(betas,center=TRUE);
+eigenPrincomp=Princomp.analysis$sdev;
+rotPrincomp=Princomp.analysis$rotation;
+windows()
+barplot(eigenPrincomp,col="red", 
+  	ylab="eigenvalues of beta value matrix",
+		xlab="Labels of clusters",xaxt="n");
+#axis(1,at=0.7+1.2*(0:6),c("PC1","PC2","PC3","PC4","PC5","PC6","PC7"));
+
+projection=t(rotPrincomp[,-dim(rotPrincomp)[2]])%*%t(betas);
+
+windows()
+plot(projection[1,],projection[2,],main="FirstPC vs SecondPC plot",xlab="First PC",
+	ylab="Second PC",col=c(rep("red",17),rep("blue",40)));
+legend("bottomright",c("N samples", "T samples"),fill=c("red","blue"));
+
+windows()
+plot(projection[1,],projection[3,],main="FirstPC vs ThirdPC plot",xlab="First PC",
+	ylab="Third PC",col=c(rep("red",17),rep("blue",40)));
+legend("bottomright",c("N samples", "T samples"),fill=c("red","blue"));
+
+methData_reduced=methData[1:2000,];
+
+
+```
+
+Now we apply a topic model type approach on the best $1000$ CpG sites. so, we consider $1000 \times 57$ matrix and try to fit a Beta Topic model to that data.
+
+```{r,eval=TRUE,echo=TRUE}
+  reverse_transform=function(x) 
+  {
+    out=array(0,K-1);
+		for(i in 1:(K-1))
+		{
+			out[i]=log((x[i]+10^(-5))/(x[K]+10^(-5)));
+		}
+		return(out)
+	}
+
+# Data
+  
+
+	# Log-Likelihood
+	loglik_norm <- function(u,y,x) sum((y - x %*% u)^2)
+
+	# Transform the parameters: we just have
+	# to find a bijection between R^3 
+	# and {(a,b,c,d) \in [0,1]^4 : a+b+c+d=1}.
+
+  transform <- function(v) 
+  {
+  	# Ensure they in [0,1]
+  	temp =c(exp(v),1);
+  	out=temp/(1+sum(exp(v)));
+  	return(out)
+	}
+
+
+
+```
+
+Now we consider the **methData_reduced** table that I obtained at the end of the initial R chunk which has $2000$ rows corresponding to the top varying CpG sites and $57$ columns corresponding to the tissue samples of which the first $17$ correspond to the normal tissue samples and the last $40$ corresponds to the tumor tissue samples. 
+
+
+```{r,echo=TRUE,eval=TRUE}
+
+
+meth=t(methData_reduced);
+
+scale=1; N=dim(meth)[1]; G=dim(meth)[2];
+
+K=6;
+
+####  The starting value of omega (topic prop weights)  ####################
+
+# Use a preset seed so the example is reproducable.
+require("setRNG")
+old.seed <- setRNG(list(kind="Mersenne-Twister", normal.kind="Inversion",
+seed=54321))
+library(gtools)
+#omega_preprocess=matrix(rdirichlet(N,c(scale/K,scale/K,scale/K,scale/K)), nrow=N);
+omega_preprocess=matrix(rdirichlet(N,rep(scale/K,K)), nrow=N);
+
+
+
+logit_meth=log(meth+1e-07)-log(1-meth+1e-07);
+y=matrix(logit_meth,1,N*G);
+
+
+omega0=omega_preprocess
+alpha0=matrix(rnorm((K)*G,1,1),nrow=(K));
+param0=c(matrix(omega0,1,N*K),matrix(alpha0,1,K*G));
+
+library(SQUAREM)
+
+beta_process.probe <- function(param_vec,y)
+{
+  logit_meth=matrix(y,N,G);
+  #N=dim(logit_meth)[1]; G=dim(logit_meth)[2];
+	omega0=matrix(param_vec[1:(N*K)],N,K);
+	alpha0=matrix(param_vec[-(1:(N*K))],K,G);
+	
+	svd_omega=svd(omega0);
+	temp1=t(svd_omega$v)%*%diag(1/svd_omega$d^2,dim(omega0)[2])%*%svd_omega$v;
+	temp2=t(omega0)%*%logit_meth;
+	# temp2=t(omega0)%*%pnorm_meth;
+	temp1=solve(t(omega0)%*%omega0);
+	H = temp1%*%temp2;
+
+	###  Estimation of the matrix W (or omega) 
+
+	omega=matrix(0,N,K);
+	for(n in 1:N)
+	{
+		omega_vec=omega0[n,];
+		meth_vec=logit_meth[n,];
+		res=optim(reverse_transform(omega_vec), function(v) loglik_norm(transform(v),meth_vec,t(H)) );
+		omega[n,]=transform(res$par);
+	}
+
+	param_vec_omega=matrix(omega,1,N*K);
+	param_vec_alpha=matrix(H,1,K*G);
+	param_new_vec=c(param_vec_omega,param_vec_alpha);
+	param_vec=param_new_vec
+	return(param_new_vec)
+}
+
+options(warn=-1)
+system.time(res <- squarem(p=param0,y=y, fixptfn=beta_process.probe, control=list(maxiter = 100, trace = FALSE)));
+
+omega_initial=matrix(res$par[1:(N*K)],N,K);
+alpha_initial=matrix(res$par[-(1:(N*K))],K,G)
+
+# docweights=omega_initial;
+# library(permute);
+# library("BioPhysConnectoR");
+# perm_set=rbind(1:K,allPerms(1:K));
+# diff=array(0,dim(perm_set)[1]);
+# for (p in 1:dim(perm_set)[1])
+# {
+#  temp=docweights[,perm_set[p,]];
+#	diff[p]=fnorm(temp,omega_true);
+# }
+
+# p_star=which(diff==min(diff));
+# docweights=docweights[,perm_set[p_star,]];
+
+# omega_initial=docweights;
+# alpha_initial=alpha_initial[perm_set[p_star,],];
+
+windows()
+k=K
+barplot(t(omega_initial),col=2:(k+1),axisnames=F,space=0,border=NA,main="",las=1,ylim=c(0,1),cex.axis=1.5,cex.main=1.4)
+title(main=paste("Structure Plot of Preprocessing topic proportions,k=",K))
+
+```
+
+The final iterative algorithm for estimating the topic proportions and the effect sizes of the beta Topic model is given as follows
+
+```{r,echo=TRUE,eval=TRUE}
+
+meth=t(methData_reduced);
+
+y=matrix(meth,1,N*G);
+
+
+omega_loglik_beta = function(omega_vec,meth_vec,alpha,phi)
+{
+
+  G=length(meth_vec);
+  sum=0;
+  for(g in 1:G)
+	{
+		mean=inv.logit(omega_vec%*%alpha[,g]);
+		#cat(lambda,"\n")
+		sum=sum - dbeta(meth_vec[g],shape1=mean*phi[g],shape2=(1-mean)*phi[g],log=TRUE) ;
+		# cat(sum,"\n");
+	}
+
+	return(sum);
+}
+
+
+scale=1; N=dim(meth)[1]; G=dim(meth)[2];
+
+K=6;
+
+####  The starting value of omega (topic prop weights)  ####################
+
+# Use a preset seed so the example is reproducable.
+require("setRNG")
+old.seed <- setRNG(list(kind="Mersenne-Twister", normal.kind="Inversion",
+seed=54321))
+
+# omega0=matrix(rdirichlet(N,c(scale/K,scale/K,scale/K,scale/K)), nrow=N);
+omega0=omega_initial;
+alpha0=matrix(rnorm(K*G,0,1),nrow=(K)); ### the matrix of fixed effects
+phi0=rnorm(G,10,1);
+param0=c(matrix(omega0,1,N*K),matrix(alpha0,1,K*G),phi0);
+
+
+library(betareg)
+library(lme4)
+alpha=matrix(0,K,G);
+
+library(SQUAREM)
+
+beta_est.probe <- function(param_vec,y)
+{
+	meth=matrix(y,N,G);
+	omega0=matrix(param_vec[1:(N*K)],N,K);
+
+	############  estimation of alpha (effect) and phi (disp) #############
+
+	alpha=matrix(0,K,G);
+	phi=array(0,G);
+	for(g in 1:G)
+	{
+		meth_col=meth[,g];
+    meth_col[which(meth_col<1e-02)]=runif(length(meth_col<1e-02),0,1e-02);
+    meth[,g]=meth_col;
+		fit=betareg(meth_col~omega0[,1]+omega0[,2]+omega0[,3]+omega0[,4]+omega0[,5]+omega0[,6]-1);
+    # fit=betareg(meth_col~omega0[,1]+omega0[,2]-1)
+		alpha[,g]=as.numeric(fit$coef[1]$mean);
+		phi[g]=as.numeric(fit$coef[2]);
+	}
+
+	omega=matrix(0,N,K);
+	for(n in 1:dim(meth)[1])
+	{
+		omega_vec=omega0[n,];
+		meth_vec=meth[n,];
+		res=optim(reverse_transform(omega_vec), function(v) omega_loglik_beta(transform(v),meth_vec,alpha,phi) );
+		omega[n,]=transform(res$par);
+	}
+
+	param_vec_omega=matrix(omega,1,N*K);
+	param_vec_alpha=matrix(alpha,1,K*G);
+	param_new_vec=c(param_vec_omega,param_vec_alpha,phi);
+	param_vec=param_new_vec
+	return(param_new_vec)
+}
+
+
+options(warn=-1)
+system.time(res <- squarem(p=param0,y=y, fixptfn=beta_est.probe, control=list(maxiter = 10, trace = FALSE)));
+
+omega_final=matrix(res$par[1:(N*K)],N,K);
+alpha_final_vec=res$par[-(1:(N*K))];
+alpha_final=matrix(alpha_final_vec[1:(K*G)],K,G);
+phi_final=tail(alpha_final_vec,G);
+
+
+windows()
+k=K
+barplot(t(omega_final),col=2:(k+1),axisnames=F,space=0,border=NA,main="",las=1,ylim=c(0,1),cex.axis=1.5,cex.main=1.4)
+abline(v=17)
+title(main=paste("Structure Plot of final estd. topic proportions,k=",K))
+axis(1,at=1:57,1:57)
+
+write.table(phi_final,"D:/Matthew_Stephens_Project/Methylation/Methylation Expt 2/phi_true.txt")
+
+```
+

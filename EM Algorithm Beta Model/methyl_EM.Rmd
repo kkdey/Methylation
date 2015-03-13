@@ -1,0 +1,454 @@
+---
+title: "SQUAREM script for DNA methylation"
+author: "Kushal Kumar Dey"
+date: "Sunday, March 01, 2015"
+output: html_document
+---
+
+This RmD file is being prepared with the aim that all the multiple R scripts written for the DNA methylation study are in one place and when someone runs this script, he actually gets to run the entire set of scripts and get to compare the graphical output of the true model and the model estimated using the EM or the SQUAREM type approach (with a little Bayesian tinge to it). We first write down the detailed script for the generation of the table of Beta counts corresponding to methylation. Note that for the beta regression, there is no R package available currently that performs the mixed effects model on the mean paramter. So, in this script, as of now, we have just focused on the regular topic modeling technique.
+
+
+
+
+```{r,echo=TRUE,eval=TRUE}
+#################   Assignment of the dimensionality  ##################
+
+K=4;
+G=100;
+N=500;
+
+
+#################  The fixed effect or the classical effect and dispersion estimates  ###################
+
+
+alpha_true=matrix(rnorm((K)*G,1,1),nrow=(K)); ### the matrix of fixed effects
+
+Label.Batch=c(rep(1,N/2),rep(2,N/2));
+
+phi_true=abs(rnorm(G,100,1));
+
+######################   The Random component of the Beta regression model ###########################
+
+
+B=max(Label.Batch);
+
+sigmab_true=0;
+
+beta_true=matrix(0,B,G);       
+
+for(g in 1:G)
+{
+  beta_true[,g]=rnorm(B,mean=0,sd=sigmab_true);
+}
+
+library(gtools)
+T=10;
+
+########################   The true value of the topic proportions  (omega) ##########################
+
+omega_true=matrix(rbind(rdirichlet(T*10,c(3,4,2,6)),rdirichlet(T*10,c(1,4,6,3)),
+			rdirichlet(T*10,c(4,1,2,2)),rdirichlet(T*10,c(2,6,3,2)),
+			rdirichlet(T*10,c(3,3,5,4))), nrow=N);
+
+#######################   Overdispersion term  ##########################################
+
+over_dis=0;
+
+noise_true=matrix(0,N,G);
+
+for(n in 1:N)
+{
+	noise_true[n,]=over_dis*rnorm(G,0,1);
+}
+
+#######################  Generating the table of beta values ####################################
+
+
+read_meth=matrix(0,N,G);
+indicator_true=matrix(0,N,G);  ###  which topic/cluster each term belongs to 
+
+for(n in 1:N)
+{
+	for(g in 1:G)
+	{
+		index=sample(1:K,1,omega_true[n,],replace=T);
+		mean=inv.logit(alpha_true[index,g] +beta_true[Label.Batch[n],g]+noise_true[n,g]);
+		read_meth[n,g]=rbeta(1,shape1=mean*phi_true[g],shape2=(1-mean)*phi_true[g],ncp=0);
+		indicator_true[n,g]=index;
+	}
+}
+
+#######################  The plot of the Topic proportions ##########################################
+
+windows()
+k=K
+barplot(t(omega_true),col=2:(k+1),axisnames=F,space=0,border=NA,main="",las=1,ylim=c(0,1),cex.axis=1.5,cex.main=1.4)
+title(main=paste("Structure Plot of true topic proportions,k=",K))
+```
+
+So, the table **read_meth** is of interest to us from here on. Imagine that along the rows od this table are the samples (tissue samples for instance) and along the columns are the CpG sites (analogous to genes in the RNA-seq data). In order to perform the EM algorithm, first we should use a valid preprocessing technique so that the starting values of the estimates are good for handling. 
+
+We first define a few functions that we used for the normal model set up which comprises of the transformation of the topic proportion vectors $\omega$ to the real line and the reverse transfomration and the normal log likelihood. These will be required in our preprocessing steps.
+
+```{r,eval=TRUE,echo=TRUE}
+  reverse_transform=function(x) 
+  {
+		out=array(0,K-1);
+		for(i in 1:(K-1))
+		{
+			out[i]=log((x[i]+10^(-5))/(x[K]+10^(-5)));
+		}
+		return(out)
+	}
+
+# Data
+  
+
+	# Log-Likelihood
+	loglik_norm <- function(u,y,x) sum((y - x %*% u)^2)
+
+	# Transform the parameters: we just have
+	# to find a bijection between R^3 
+	# and {(a,b,c,d) \in [0,1]^4 : a+b+c+d=1}.
+
+  transform <- function(v) 
+  {
+  	# Ensure they in [0,1]
+  	temp =c(exp(v),1);
+  	out=temp/(1+sum(exp(v)));
+  	return(out)
+	}
+
+
+
+```
+
+
+
+The total elapsed system time under *Squarem* Implementation for the preprocessing part was 51.23 seconds, while for the *fpiter* or the usual EM implementation, the total elapsed time was found to be 62.74 seconds for 100 iterations. So, overall gain per iteration was around 0.1 second per iteration if we use Squarem. I am hoping that it is more time efficient for large datasets. I am presenting here both the Squarem and the Non Squarem versions and I have evaluated the Squarem version only.
+
+```{r,eval=TRUE,echo=TRUE}
+
+##########################    The SQUAREM version of the Preprocessing Step  ###############################################
+require("setRNG")
+old.seed <- setRNG(list(kind="Mersenne-Twister", normal.kind="Inversion",
+seed=54321))
+
+meth=read_meth
+
+scale=1; K=4; N=500; G=100;
+
+####  The starting value of omega (topic prop weights)  ####################
+
+omega_preprocess=matrix(rdirichlet(N,c(scale/K,scale/K,scale/K,scale/K)), nrow=N);
+
+logit_meth=log(meth)-log(1-meth);
+y=matrix(logit_meth,1,N*G);
+
+# Use a preset seed so the example is reproducable.
+# Use a preset seed so the example is reproducable.
+#require("setRNG")
+#old.seed <- setRNG(list(kind="Mersenne-Twister", normal.kind="Inversion",
+#seed=54321))
+
+
+omega0=omega_preprocess
+alpha0=matrix(rnorm((K)*G,1,1),nrow=(K));
+param0=c(matrix(omega0,1,N*K),matrix(alpha0,1,K*G));
+options(warn=-1)
+
+
+library(SQUAREM)
+
+beta_process.em <- function(param_vec,y)
+{
+  logit_meth=matrix(y,N,G);
+	#N=dim(logit_meth)[1]; G=dim(logit_meth)[2];
+	omega0=matrix(param_vec[1:(N*K)],N,K);
+	alpha0=matrix(param_vec[-(1:(N*K))],K,G);
+	
+	svd_omega=svd(omega0);
+	temp1=t(svd_omega$v)%*%diag(1/svd_omega$d^2,dim(omega0)[2])%*%svd_omega$v;
+	temp2=t(omega0)%*%logit_meth;
+	# temp2=t(omega0)%*%pnorm_meth;
+	temp1=solve(t(omega0)%*%omega0);
+	H = temp1%*%temp2;
+
+	###  Estimation of the matrix W (or omega) 
+
+	omega=matrix(0,N,K);
+	for(n in 1:N)
+	{
+		omega_vec=omega0[n,];
+		meth_vec=logit_meth[n,];
+		res=optim(reverse_transform(omega_vec), function(v) loglik_norm(transform(v),meth_vec,t(H)) );
+		omega[n,]=transform(res$par);
+	}
+
+	param_vec_omega=matrix(omega,1,N*K);
+	param_vec_alpha=matrix(H,1,K*G);
+	param_new_vec=c(param_vec_omega,param_vec_alpha);
+	param_vec=param_new_vec
+	return(param_new_vec)
+}
+
+system.time(res <- squarem(p=param0,y=y, fixptfn=beta_process.em, control=list(tol=1e-04, maxiter = 100, trace = FALSE)));
+
+
+```
+
+The non Squarem version is only documented but not evaluated in this case, but one can use this instead as well
+
+```{r,eval=FALSE,echo=TRUE}
+
+###############################   The  FPITER (Non Squarem)  Version #########################################################
+
+omega_preprocess=matrix(rdirichlet(N,c(scale/K,scale/K,scale/K,scale/K)), nrow=N);
+
+logit_meth=log(meth)-log(1-meth);
+maxIter=100;
+
+iteration=1;
+omega0=omega_preprocess;
+alpha0=matrix(rnorm((K)*G,1,1),nrow=(K));
+param0=c(matrix(omega0,1,N*K),matrix(alpha0,1,K*G));
+y=matrix(logit_meth,1,N*G);
+
+
+system.time(
+while(iteration<=maxIter)
+{
+  param0=beta_process.em(param0,y);
+	iteration=iteration+1;
+}   )
+
+omega_initial=matrix(param0[1:(N*K)],N,K);
+alpha_initial=matrix(param0[-(1:(N*K))],K,G);
+
+
+```
+
+We hence report the topic proportion Structure plot and also report the preprocessing estimates of the topic proportions and topic effect sizes in the chunk below.
+
+```{r,echo=TRUE,eval=TRUE}
+
+omega_initial=matrix(res$par[1:(N*K)],N,K);
+alpha_initial=matrix(res$par[-(1:(N*K))],K,G)
+
+docweights=omega_initial;
+library(permute);
+library("BioPhysConnectoR");
+perm_set=rbind(1:K,allPerms(1:K));
+diff=array(0,dim(perm_set)[1]);
+for (p in 1:dim(perm_set)[1])
+{
+  temp=docweights[,perm_set[p,]];
+	diff[p]=fnorm(temp,omega_true);
+}
+
+p_star=which(diff==min(diff));
+docweights=docweights[,perm_set[p_star,]];
+
+omega_initial=docweights;
+alpha_initial=alpha_initial[perm_set[p_star,],];
+
+windows()
+k=K
+barplot(t(omega_initial),col=2:(k+1),axisnames=F,space=0,border=NA,main="",las=1,ylim=c(0,1),cex.axis=1.5,cex.main=1.4)
+title(main=paste("Structure Plot of Preprocessing topic proportions,k=",K))
+
+
+```
+
+Across most runs the preprocessing topic proportions would be quite close to the true topic proportions, as evident from the two graphs presented above. However the effect size estimates $\alpha$ would not be that close to each other. So, I decided to use the alpha log likelihood to modify these effect size estimates given these preprocessing values.
+
+```{r,echo=TRUE,eval=TRUE}
+
+###################   alpha log likelihood term for beta model ######################################################
+
+meth_loglik_EM_alpha = function(alpha_vec,meth,omega,phi,gene_label)
+{
+  g=gene_label;
+	mu=plogis(alpha_vec);
+	mu[mu<1e-04]=1e-04;
+	mu[mu>(1-1e-04)]=(1-1e-04);
+	sum=0;
+	for(n in 1:N)
+	{
+		out=0
+		for(k_index in 1:K)
+		{
+			out=out+omega[n,k_index]*dbeta(meth[n,g],
+					shape1=mu[k_index]*phi[g],
+						shape2=(1-mu[k_index])*phi[g],ncp=0);
+		}
+		sum=sum-log(out);
+	}
+	return(abs(sum))
+}
+
+
+########################   Iterative scheme to optimize the alpha effect sizes #############################
+
+
+alpha0=alpha_initial;
+omega0=omega_initial; 
+
+system.time(
+for(g in 1:G)
+{
+  res=optim(alpha0[,g], function(v) meth_loglik_EM_alpha(v,meth,omega0,phi_true,g),
+		method="Nelder-Mead")
+	alpha0[,g]=res$par;
+}
+)
+
+alpha_initial=alpha0;
+
+#######################  The effect size estimates (refined) ################################################
+
+```
+
+This step is expensive in terms of time complexity, so I felt it would not be a good idea to repet this step too many times. So, I use this optimization technique only once, and from here on I use a different technique, a more empirical one, to get more refined estimates. It must be kept in mind that the initial estimates of the topic proportions and the effet sizes, namely, $\omega$ and $\alpha$ are very good right now and so, we should not require too many steps in the actula EM algorithm we employ in the final step to obtain iterations. We resort to using the Squarem technique again as it is relatively fast and perform 20 iterations. The convergence is usually observed after 10 iterations only. 
+
+```{r,echo=TRUE,eval=TRUE}
+
+################## Final Step  SQUAREM Technique Implementation  ################################################
+
+
+meth=read_meth
+y=matrix(meth,1,N*G);
+
+scale=1; K=4; N=500; G=100;
+
+####  The starting value of omega (topic prop weights)  ####################
+
+# Use a preset seed so the example is reproducable.
+require("setRNG")
+old.seed <- setRNG(list(kind="Mersenne-Twister", normal.kind="Inversion",
+seed=54321))
+
+omega0=omega_initial;
+alpha0=alpha_initial;
+param0=c(matrix(omega0,1,N*K),matrix(alpha0,1,K*G));
+
+
+library(betareg)
+
+beta_final.em <- function(param_vec,y)
+{
+  meth=matrix(y,N,G);
+	omega0=matrix(param_vec[1:(N*K)],N,K);
+	alpha0=matrix(param_vec[-(1:(N*K))],K,G);
+	
+
+	###############   Estimation of omega  ############################
+
+	omega=matrix(0,N,K);
+	Z=array(0,c(N,K,G));
+
+	for(n in 1:N)
+	{
+		for(g in 1:G)
+		{
+			for(k in 1:K)
+			{
+				mu=inv.logit(alpha0[k,g]);
+				mu[mu<1e-04]=1e-04;
+				mu[mu>(1-1e-04)]=(1-1e-04);
+
+				Z[n,k,g]=omega0[n,k]*dbeta(meth[n,g],
+						shape1=mu*phi_true[g],
+						shape2=(1-mu)*phi_true[g],ncp=0);
+			}
+			Z[n,,g]=(Z[n,,g]+1e-07)/sum(Z[n,,g]+1e-07)
+		}
+	}
+
+	for(n in 1:N)
+	{
+		for(k in 1:K)
+		{
+			omega[n,k]=sum(Z[n,k,])/G;
+		}
+	}
+
+	##################  Defining the label matrix ###################
+
+	indicator=matrix(0,N,G);
+	for(n in 1:N)
+	{
+		for(g in 1:G)
+		{
+			indicator[n,g]=sample(1:K,1,(Z[n,,g]/sum(Z[n,,g])),replace=TRUE);
+		}
+	}
+	
+
+	##################  Estimation of alpha  ########################
+
+	alpha=alpha0;
+
+	for(g in 1:G)
+	{
+		meth_col=meth[,g];
+		indicator_col=indicator[,g];
+		fit=betareg(meth_col~as.factor(indicator_col)-1);
+		alpha[sort(unique(indicator_col)),g]=as.numeric(fit$coef[1]$mean);
+		# phi[g]=as.numeric(fit$coef[2]);
+	}
+
+	################## Pooling everything back in vector ###########
+
+	param_vec_omega=matrix(omega,1,N*K);
+	param_vec_alpha=matrix(alpha,1,K*G);
+	param_new_vec=c(param_vec_omega,param_vec_alpha);
+	param_vec=param_new_vec
+	return(param_new_vec)
+}
+
+
+options(warn=-1)
+system.time(res <- squarem(p=param0,y=y, fixptfn=beta_final.em, control=list(maxiter = 20, trace = FALSE)));
+
+##################  Adjusting for labeling and plotting ####################
+
+omega_final=matrix(res$par[1:(N*K)],N,K);
+alpha_final=matrix(res$par[-(1:(N*K))],K,G)
+
+docweights=omega_final;
+library(permute);
+library("BioPhysConnectoR");
+perm_set=rbind(1:K,allPerms(1:K));
+diff=array(0,dim(perm_set)[1]);
+for (p in 1:dim(perm_set)[1])
+{
+	temp=docweights[,perm_set[p,]];
+	diff[p]=fnorm(temp,omega_true);
+}
+
+p_star=which(diff==min(diff));
+docweights=docweights[,perm_set[p_star,]];
+
+omega_final=docweights;
+alpha_final=alpha_final[perm_set[p_star,],];
+
+
+windows()
+k=K
+barplot(t(omega_final),col=2:(k+1),axisnames=F,space=0,border=NA,main="",las=1,ylim=c(0,1),cex.axis=1.5,cex.main=1.4)
+title(main=paste("Structure Plot of Final estd. topic proportions,k=",K))
+
+windows()
+k=K
+barplot(t(omega_initial),col=2:(k+1),axisnames=F,space=0,border=NA,main="",las=1,ylim=c(0,1),cex.axis=1.5,cex.main=1.4)
+title(main=paste("Structure Plot of Preprocessing topic proportions,k=",K))
+
+windows()
+k=K
+barplot(t(omega_true),col=2:(k+1),axisnames=F,space=0,border=NA,main="",las=1,ylim=c(0,1),cex.axis=1.5,cex.main=1.4)
+title(main=paste("Structure Plot of true topic proportions,k=",K))
+
+```
+
+If one looks closely it becomes clear that indeed there is some refinement in the final estimated topic model compared to the preprocessing topic model but the difference is not huge.
